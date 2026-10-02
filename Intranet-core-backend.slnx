@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="Intranet.Core/Intranet.Core.csproj" />
+  <Project Path="Intranet.Domain/Intranet.Domain.csproj" />
+  <Project Path="Intranet.Infrastructure/Intranet.Infrastructure.csproj" />
+  <Project Path="Intranet.Web/Intranet.csproj" />
+</Solution>

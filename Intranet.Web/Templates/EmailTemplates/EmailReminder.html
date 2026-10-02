@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <title>Task Reminder</title>
+</head>
+<body style="font-family: Arial, sans-serif; background-color: #f5f7fa; padding: 20px;">
+    <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+            <td align="center">
+                <table width="700" style="background:#ffffff; padding:30px; border-radius:8px;">
+                    <tr>
+                        <td>
+                            <h2 style="color:#1a1a1a;">Task Reminder</h2>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding-top:10px; color:#333;">
+                            Hello <strong>{{RecipientName}}</strong>,
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding-top:10px; color:#333;">
+                            This is your scheduled reminder for the tasks configured in the system.
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding-top:20px; color:#333;">
+                            <strong>Reminder Date:</strong> {{Date}}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding-top:20px;">
+                            <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                                <thead>
+                                    <tr>
+                                        <th align="left" style="padding:8px; border:1px solid #e2e8f0; background:#f8fafc;">Task</th>
+                                        <th align="left" style="padding:8px; border:1px solid #e2e8f0; background:#f8fafc;">Projected Completion Date</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {{TaskRows}}
+                                </tbody>
+                            </table>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding-top:25px; font-size:13px; color:#666;">
+                            This is an automated message from Infinite Investments.
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

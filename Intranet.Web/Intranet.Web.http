@@ -1,0 +1,6 @@
+@Intranet.Web_HostAddress = http://localhost:5155
+
+GET {{Intranet.Web_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
