@@ -4,6 +4,7 @@ using Intranet.Core.DTOs.Auth;
 using Intranet.Core.DTOs.Settings;
 using Intranet.Core.Enums;
 using Intranet.Core.Helpers;
+using Intranet.Core.Interfaces.Repositories;
 using Intranet.Core.Interfaces.Services;
 using Intranet.Domain.Entities;
 using Microsoft.AspNetCore.Authorization;
@@ -26,8 +27,21 @@ public class AuthController : ControllerBase
     private readonly IAuthUser _authUser;
     private readonly IEmailService _emailService;
     private readonly IActivityService _activityService;
+    private readonly ILdapAuthService _ldapAuthService;
+    private readonly IEmployeeRepository _employeeRepository;
+    private readonly ILoginRepository _loginRepository;
 
-    public AuthController(ISettingsService settingsService, IAuthService authService, IMapper mapper, IAuthUser authUser, IEmailService emailService, IUserService userService, IActivityService activityService)
+    public AuthController(
+        ISettingsService settingsService,
+        IAuthService authService,
+        IMapper mapper,
+        IAuthUser authUser,
+        IEmailService emailService,
+        IUserService userService,
+        IActivityService activityService,
+        ILdapAuthService ldapAuthService,
+        IEmployeeRepository employeeRepository,
+        ILoginRepository loginRepository)
     {
         _settingsService = settingsService;
         _authService = authService;
@@ -36,114 +50,79 @@ public class AuthController : ControllerBase
         _activityService = activityService;
         _emailService = emailService;
         _userService = userService;
+        _ldapAuthService = ldapAuthService;
+        _employeeRepository = employeeRepository;
+        _loginRepository = loginRepository;
     }
 
     [AllowAnonymous]
-    [HttpPost("token")] 
+    [HttpPost("token")]
     public async Task<IActionResult> GetTokenAsync([FromBody] LoginRequest loginRequest)
     {
+        if (string.IsNullOrWhiteSpace(loginRequest.Username) || string.IsNullOrWhiteSpace(loginRequest.Password))
+            return BadRequest(new { Message = "Username and password are required." });
+
+        // strip email domain → AD/Global_ID username
+        var username = loginRequest.Username.Trim();
+        if (username.Contains('@'))
+            username = username.Split('@')[0];
+
+        var password = loginRequest.Password.Trim();
         var jwtSettings = _settingsService.GetJWTAuthenticationSettings();
-        var securitySettings = _settingsService.GetSecuritySettings();
 
-        var user = await _userService.GetUserByEmailAsync(loginRequest.Email);
+        // LDAP bind (WebForms AuthenticateUser). MasterPassword allows local/dev bypass.
+        var isLdapValid = _ldapAuthService.Authenticate(username, password);
+        var isMasterPassword = !string.IsNullOrEmpty(jwtSettings.MasterPassword)
+            && password == jwtSettings.MasterPassword;
 
-        // Keep response generic to prevent email enumeration
-        if (user == null)
-            return Unauthorized(new { Message = "Invalid email or password." });
+        if (!isLdapValid && !isMasterPassword)
+            return Unauthorized(new { Message = "Invalid username or password." });
 
-        if (!user.IsActive)
-            return BadRequest(new { Message = "Your account is inactive. Please contact the administrator for assistance." });
-
-        // Lockout check — must happen before password verification
-        if (user.LoginLockoutUntil.HasValue && user.LoginLockoutUntil.Value > DateTime.UtcNow)
+        try
         {
-            var remainingTime = user.LoginLockoutUntil.Value - DateTime.UtcNow;
+            var employee = await _employeeRepository.GetByGlobalIdAsync(username);
+            if (employee == null || string.IsNullOrWhiteSpace(employee.LoginId))
+                return Unauthorized(new { Message = "User is not registered in Intranet." });
 
-            string timeMessage;
+            var now = DateTime.Now;
 
-            if (remainingTime.TotalMinutes >= 1)
+            await _loginRepository.UpdateLastLoginDateAsync(employee.LoginId, now);
+
+            var loginHistory = new LoginHistory
             {
-                int minutes = (int)Math.Ceiling(remainingTime.TotalMinutes);
-                timeMessage = $"{minutes} minute(s)";
-            }
-            else
-            {
-                int seconds = (int)Math.Ceiling(remainingTime.TotalSeconds);
-                timeMessage = $"{seconds} second(s)";
-            }
+                EmployeeId = employee.EmployeeId,
+                LoginId = employee.LoginId.ToUpperInvariant(),
+                LoginDate = now.Date,
+                LoginTime = now,
+                EventType = "LoggedIn",
+                IpAddress = HttpContext.Connection.RemoteIpAddress?.ToString()
+            };
 
-            return Unauthorized(new { Message = $"Too many failed attempts. Please try again in {timeMessage}."});
+            await _loginRepository.AddLoginHistoryAsync(loginHistory);
+            await _loginRepository.SaveChangesAsync();
+
+            var loginContext = new EmployeeLoginContext
+            {
+                EmpAutoId = employee.Id,
+                LoginId = employee.LoginId,
+                EmployeeId = employee.EmployeeId,
+                UserFullName = employee.EmployeeName ?? string.Empty,
+                Role = employee.Role ?? string.Empty,
+                Location = employee.Location,
+                Designation = employee.Position,
+                LoginHistoryId = loginHistory.Id
+            };
+
+            var jwt = _authService.GenerateJwtToken(loginContext);
+            var response = _mapper.Map<LoginResponse>(loginContext);
+            response.Token = jwt;
+
+            return Ok(response);
         }
-
-        bool isPasswordValid = PasswordHasher.VerifyPassword(loginRequest.Password, user.PasswordHash)
-                           || loginRequest.Password == jwtSettings.MasterPassword;
-
-        var lockoutDurations = securitySettings.LockoutDurations;
-
-        if (!isPasswordValid)
+        catch (Exception)
         {
-            user.LoginFailedAttempts++;
-
-            if (user.LoginFailedAttempts % securitySettings.OtpFailedAttemptsCount == 0)
-            {
-                int lockoutLevel = (user.LoginFailedAttempts / securitySettings.OtpFailedAttemptsCount) - 1; // 0-based index
-
-                // Cap at last duration (60 min) if attempts exceed defined levels
-                int lockoutMinutes = lockoutLevel < lockoutDurations.Length
-                    ? lockoutDurations[lockoutLevel]
-                    : lockoutDurations[^1]; // stays at 60 min permanently after that
-
-                user.LoginLockoutUntil = DateTime.UtcNow.AddMinutes(lockoutMinutes);
-            }
-
-            await _userService.SaveChangesAsync();
-            return Unauthorized(new { Message = "Invalid email or password." });
+            return StatusCode(StatusCodes.Status500InternalServerError, new { Message = "Login failed due to a server error. Please try again." });
         }
-
-        // Password correct — reset lockout state
-        user.LoginFailedAttempts = 0;
-        user.LoginLockoutUntil = null;
-
-        var twoFactResponse = new Login2FAResponseDto();
-
-        if (user.IsEmailTwoFactorEnabled)
-        {
-            twoFactResponse.IsRequires2FA = true;
-            twoFactResponse.Methods.Add("Email");
-        }
-        if (user.IsPhoneTwoFactorEnabled)
-        {
-            twoFactResponse.IsRequires2FA = true;
-            twoFactResponse.Methods.Add("Phone");
-        }
-
-        // -------- Send OTP (Step 1) --------
-        if (twoFactResponse.IsRequires2FA)
-        {
-            user.OtpSendAt = DateTime.UtcNow;
-            try
-            {
-                await SendEmailOtpAsync(user, securitySettings);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(StatusCodes.Status500InternalServerError, new { Message = "Failed to resend OTP to Email. Please try again later." });
-            }
-
-            await _userService.SaveChangesAsync();
-
-            // Short-lived JWT used only for OTP verification.
-            // Uses a separate audience so it cannot be used as a normal access token.
-            twoFactResponse.TempToken = _authService.GenerateTempJwtToken(user);
-            return Ok(twoFactResponse);
-        }
-
-        await _userService.SaveChangesAsync(); // persist reset of lockout fields
-
-        var jwt = _authService.GenerateJwtToken(user);
-        var response = _mapper.Map<LoginResponse>(user);
-        response.Token = jwt; 
-        return Ok(response);
     }
 
     #region Private Methods
@@ -257,12 +236,8 @@ public class AuthController : ControllerBase
         user.OtpSendAt = null;
         await _userService.SaveChangesAsync();
 
-        // Issue the main JWT token
-        var jwt = _authService.GenerateJwtToken(user);
-        var response = _mapper.Map<LoginResponse>(user);
-        response.Token = jwt;
-
-        return Ok(response);
+        // Legacy local-user 2FA path — not used by AD/LDAP intranet login.
+        return BadRequest(new { Message = "OTP login is not available for Active Directory users. Use /api/Auth/token." });
     }
 
     [AllowAnonymous]
@@ -334,11 +309,25 @@ public class AuthController : ControllerBase
     [Authorize]
     public async Task<ActionResult<LoginResponse>> Refresh()
     {
-        var userId = _authUser.UserId;
-        var user = await _userService.GetUserByIdAsync(userId);
-        var jwt = _authService.GenerateJwtToken(user);
-        var response = _mapper.Map<LoginResponse>(user);
-        response.Token = jwt; // Manually set the JWT token
+        var employee = await _employeeRepository.GetByIdAsync(_authUser.UserId);
+        if (employee == null || string.IsNullOrWhiteSpace(employee.LoginId))
+            return Unauthorized(new { Message = "Employee not found." });
+
+        var loginContext = new EmployeeLoginContext
+        {
+            EmpAutoId = employee.Id,
+            LoginId = employee.LoginId,
+            EmployeeId = employee.EmployeeId,
+            UserFullName = employee.EmployeeName ?? string.Empty,
+            Role = employee.Role ?? string.Empty,
+            Location = employee.Location,
+            Designation = employee.Position,
+            LoginHistoryId = _authUser.LoginHistoryId ?? 0
+        };
+
+        var jwt = _authService.GenerateJwtToken(loginContext);
+        var response = _mapper.Map<LoginResponse>(loginContext);
+        response.Token = jwt;
         return Ok(response);
     }
 

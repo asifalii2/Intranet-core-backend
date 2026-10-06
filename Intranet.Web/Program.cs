@@ -8,6 +8,7 @@ using Intranet.Infrastructure.Contexts;
 using Intranet.Infrastructure.Email;
 using Intranet.Infrastructure.Identity;
 using Intranet.Infrastructure.Repositories;
+using Intranet.Infrastructure.Services;
 using Intranet.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -15,6 +16,7 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
+using System.IdentityModel.Tokens.Jwt;
 using System.Reflection;
 using System.Security.Claims;
 using System.Text;
@@ -76,23 +78,24 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
               OnTokenValidated = async context =>
               {
 
-                  var userIdClaim = context.Principal.FindFirst(ClaimTypes.NameIdentifier);
+                  var userIdClaim = context.Principal.FindFirst(ClaimTypes.NameIdentifier)
+                      ?? context.Principal.FindFirst(JwtRegisteredClaimNames.Sub);
 
-                  if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out var userId))
+                  if (userIdClaim == null || !int.TryParse(userIdClaim.Value, out var employeeId))
                   {
-                      context.Fail("Invalid user ID");
+                      context.Fail("Invalid employee ID");
                       return;
                   }
                   var dbContext = context.HttpContext.RequestServices.GetRequiredService<IntranetDBContext>();
-                  var role = await dbContext.Users
+                  var employee = await dbContext.Employees
                     .AsNoTracking()
-                    .Where(x => x.Id == userId && !x.IsDeleted && x.IsActive)
-                    .Select(x => x.Role)
+                    .Where(x => x.Id == employeeId)
+                    .Select(x => new { x.Id, x.Role, x.LoginId })
                     .FirstOrDefaultAsync();
 
-                  if (role == null)
+                  if (employee == null || string.IsNullOrWhiteSpace(employee.LoginId))
                   {
-                      context.Fail("User does not exist or is inactive");
+                      context.Fail("Employee does not exist or is inactive");
                       return;
                   }
 
@@ -104,8 +107,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                       claimsIdentity.RemoveClaim(claim);
                   }
 
-                  // Add new role
-                  claimsIdentity.AddClaim(new Claim(ClaimTypes.Role, role));
+                  // Refresh role from Employee (same scalar Role column used by WebForms)
+                  claimsIdentity.AddClaim(new Claim(ClaimTypes.Role, employee.Role ?? string.Empty));
               },
               //REQUIRED for SignalR JWT over WebSockets
               OnMessageReceived = context =>
@@ -154,6 +157,7 @@ builder.Services.AddScoped<IEmailService, GmailSmtpEmailService>();
 builder.Services.AddScoped<IEmailTemplateService, EmailTemplateService>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddScoped<ILdapAuthService, LdapAuthService>();
 builder.Services.AddScoped<IAttachmentService, AttachmentService>();
 builder.Services.AddScoped<IActivityService, ActivityService>();
 builder.Services.AddScoped<INotificationService, NotificationService>();
@@ -161,6 +165,8 @@ builder.Services.AddScoped<INotificationHubService, NotificationHubService>();
 
 // Configuring Repositories
 builder.Services.AddScoped<IUserRepository, UserRepository>();
+builder.Services.AddScoped<IEmployeeRepository, EmployeeRepository>();
+builder.Services.AddScoped<ILoginRepository, LoginRepository>();
 builder.Services.AddScoped<IAttachmentRepository, AttachmentRepository>();
 builder.Services.AddScoped<IActivityRepository, ActivityRepository>();
 builder.Services.AddScoped<INotificationRepository, NotificationRepository>();

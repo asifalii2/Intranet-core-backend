@@ -9,6 +9,7 @@ public interface ISettingsService
     FrontendPortalUrlSettings GetFrontendPortalUrlSettings();
     EmailSettings GetEmailSettings();
     SecuritySettings GetSecuritySettings();
+    LdapSettings GetLdapSettings();
     TwilioSettings GetTwilioSettings();
     AwsS3Settings GetAwsS3Settings();
     FirebaseSettings GetFirebaseSettings();
