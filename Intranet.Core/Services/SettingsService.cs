@@ -41,6 +41,13 @@ namespace Intranet.Core.Services
             return settings;
         }
 
+        public LdapSettings GetLdapSettings()
+        {
+            var settings = new LdapSettings();
+            _configuration.GetSection("Ldap").Bind(settings);
+            return settings;
+        }
+
         public TwilioSettings GetTwilioSettings()
         {
             var settings = new TwilioSettings();
